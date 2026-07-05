@@ -1,0 +1,77 @@
+{
+  "name": "pi-usage-unified",
+  "version": "0.1.0",
+  "description": "Unified pi extension for monitoring API usage, quota, and rate limits across multiple AI providers",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typebox": "^1.1.38",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.79.0",
+    "@earendil-works/pi-tui": ">=0.79.0",
+    "typebox": "^1.1.38"
+  },
+  "peerDependenciesMeta": {
+    "typebox": { "optional": true }
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "usage-monitoring",
+    "api-quota",
+    "rate-limits",
+    "zai",
+    "cursor",
+    "codex",
+    "opencode",
+    "openrouter",
+    "deepseek"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/meisbokai/pi-usage-unified.git"
+  },
+  "author": "meisbokai",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ]
+}
