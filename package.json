@@ -66,6 +66,9 @@
   },
   "author": "meisbokai",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "package.json",
