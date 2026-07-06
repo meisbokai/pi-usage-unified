@@ -21,7 +21,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "vitest run",

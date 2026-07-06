@@ -45,7 +45,11 @@ Always set `Accept-Encoding: identity` (undici EnvHttpProxyAgent gzip quirk).
   all relative imports (incl. test imports of `../src/...`).
 - Build: `tsc` with `rootDir: "src"` → `dist/` (so `dist/index.js` matches the
   `package.json` `pi.extensions` entry). `tsconfig.test.json` extends it with
-  `rootDir: "."` + `noEmit` for typechecking `test/`.
+  `rootDir: "."` + `noEmit` for typechecking `test/`. **`dist/` is committed to
+  the repo on purpose** — it ships as build output so `pi install git:...` loads
+  the extension without a build step (git-package installs run
+  `npm install --omit=dev`, which has no `typescript` to build with). After
+  changing `src/`, run `npm run build` and commit the rebuilt `dist/`.
 - **No runtime deps** beyond pi peers + optional `typebox`. Use only Node
   built-ins. `node:sqlite` is imported dynamically (experimental). No
   `temporal-polyfill` — use `Date` math.
