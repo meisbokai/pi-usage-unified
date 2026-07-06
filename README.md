@@ -174,6 +174,8 @@ npm test             # vitest run
 npm run check        # typecheck + test
 ```
 
+The built `dist/` is committed to the repo on purpose — it ships as build output so `pi install git:...` loads the extension without a build step. After changing `src/`, run `npm run build` and commit the updated `dist/`.
+
 No runtime dependencies beyond the pi peers (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) and optional `typebox`. Uses only Node built-ins (`node:fs`, `node:os`, `node:path`, `node:sqlite`).
 
 ## License
