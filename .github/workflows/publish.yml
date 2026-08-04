@@ -1,0 +1,36 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Publish to npmjs when a `v*` (semver) tag is pushed.
+# Requires the `NPM_TOKEN` repo secret (an npm automation access token).
+# Provenance (`--provenance`) needs `id-token: write` and a public repo.
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install
+        # Full install (incl. devDeps) so prepublishOnly's `tsc` build works.
+        run: npm ci
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

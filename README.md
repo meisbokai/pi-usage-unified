@@ -18,7 +18,13 @@ It replaces the captain's previous setup of three separate usage tools:
 
 ## Install
 
+```bash
+pi install npm:pi-usage-unified
 ```
+
+Or from the git source (no npm publish needed):
+
+```bash
 pi install git:github.com/meisbokai/pi-usage-unified
 ```
 
@@ -177,6 +183,24 @@ npm run check        # typecheck + test
 The built `dist/` is committed to the repo on purpose — it ships as build output so `pi install git:...` loads the extension without a build step. After changing `src/`, run `npm run build` and commit the updated `dist/`.
 
 No runtime dependencies beyond the pi peers (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) and optional `typebox`. Uses only Node built-ins (`node:fs`, `node:os`, `node:path`, `node:sqlite`).
+
+## Releasing
+
+Releases are published to npm by the [`publish`](.github/workflows/publish.yml) GitHub Action whenever a `v*` (semver) tag — e.g. `v0.1.0` — is pushed ("flow B": tag-triggered, manual-version).
+
+```bash
+# 1. Bump the version (creates + checks out the matching v* tag locally)
+npm version patch   # or: minor | major
+
+# 2. Push the tag — this triggers the publish workflow
+git push --follow-tags
+```
+
+The workflow runs `npm ci`, builds via `prepublishOnly` (`tsc` → `dist/`), and publishes to the npm registry with build provenance (`--provenance`). It does **not** run on branch pushes — only on `v*` tags.
+
+### One-time setup (maintainer)
+
+The workflow needs an **`NPM_TOKEN`** repository secret — an [npm automation access token](https://docs.npmjs.com/creating-and-viewing-access-tokens) (granular, publish-only) created on the npm account that owns `pi-usage-unified`. Add it under the repo's **Settings → Secrets and variables → Actions**. Without it the publish step will fail with an auth error.
 
 ## License
 
