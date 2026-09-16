@@ -13,15 +13,21 @@ const singleLimitFixture = {
   },
 };
 
-/** Real-shaped fixture with all three quotas (5h, weekly, tools). */
+/**
+ * Real-shaped fixture with all three quotas (5h, weekly, tools).
+ *
+ * Reset times are relative to "now" so the rendered durations ("4h", "3d") stay
+ * stable instead of collapsing to "1m" once hardcoded dates fall into the past.
+ */
+const now = Date.now();
 const fullFixture = {
   success: true,
   code: 200,
   msg: "Operation successful",
   data: {
     limits: [
-      { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 1, nextResetTime: 1783589341669 },
-      { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 92, nextResetTime: 1783841594996 },
+      { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 1, nextResetTime: now + 4 * 3_600_000 },
+      { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 92, nextResetTime: now + 3 * 86_400_000 },
       {
         type: "TIME_LIMIT",
         unit: 5,
@@ -30,7 +36,7 @@ const fullFixture = {
         currentValue: 119,
         remaining: 3881,
         percentage: 2,
-        nextResetTime: 1785223994983,
+        nextResetTime: now + 19 * 86_400_000,
         usageDetails: [
           { modelCode: "search-prime", usage: 70 },
           { modelCode: "web-reader", usage: 49 },

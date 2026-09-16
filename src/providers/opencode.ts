@@ -1,27 +1,33 @@
 /**
  * OpenCode Go usage provider.
  *
- * Ported verbatim in behavior from the monolithic pi-usage-multi.ts.
- *
  * - Auth: API key provider `opencode-go` / `opencode`, or `OPENCODE_API_KEY`
- * - Probe: POST https://opencode.ai/zen/go/v1/chat/completions with a 1-token
- *   ping; reads rate-limit headers `x-opencode-*-usage-percent`
- *   (rolling/weekly/monthly)
- * - Optional dashboard quota via `OPENCODE_GO_WORKSPACE_ID` +
- *   `OPENCODE_GO_AUTH_COOKIE` (HTML scrape of opencode.ai/workspace/<id>/go)
+ *   (pi's auth store is the source of truth — see `../core/auth.ts`)
+ * - Primary: GET https://opencode.ai/zen/go/v1/usage — the OpenCode Go usage
+ *   API (anomalyco/opencode#16513). It returns rolling / weekly / monthly
+ *   windows with `{ status, percent, resetsAt }`, where `resetsAt` is an
+ *   absolute ISO-8601 timestamp. This is both cheaper and richer than the old
+ *   probe: no chat-completion call is spent and reset times are available.
+ * - Fallback: POST https://opencode.ai/zen/go/v1/chat/completions with a
+ *   1-token ping; reads rate-limit headers `x-opencode-*-usage-percent`
+ *   (rolling/weekly/monthly). Used ONLY when the usage endpoint fails
+ *   (network error, 401, 403, 404, 5xx) — never alongside a working endpoint,
+ *   and never to mask a response the endpoint did return. The fallback is
+ *   recorded in the data (`source` / `fallbackReason`) so `/pi-usage` shows it
+ *   rather than silently pretending the endpoint worked.
+ *
+ * The old dashboard HTML scrape (workspace id + session cookie) is gone: the
+ * usage endpoint supersedes it, so no session credentials are needed.
  */
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { FetchContext, Theme, UsageProvider } from "../core/types.js";
 import { getApiKey, PROXY_MANAGED_SENTINEL } from "../core/auth.js";
 import { UsageError } from "../core/http.js";
 import { colorForPercentage, fg } from "../core/theme.js";
-import { pct } from "../core/format.js";
-import { readJson } from "../core/config.js";
+import { formatDurationFromNow, normalizeResetAt, pct } from "../core/format.js";
 
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
-const OPENCODE_GO_DASHBOARD_PREFIX = "https://opencode.ai/workspace/";
 const OPENCODE_GO_PROBE_MODEL = "kimi-k2.6";
+const OPENCODE_GO_USER_AGENT = "pi-usage-unified/0.1.0";
 const OPENCODE_GO_PROBE_BODY = {
   model: OPENCODE_GO_PROBE_MODEL,
   messages: [{ role: "user", content: "ping" }],
@@ -30,7 +36,12 @@ const OPENCODE_GO_PROBE_BODY = {
 };
 
 export interface OpencodeWindow {
+  /** Percent of the window consumed (0–100). */
   usedPercent: number;
+  /** API-reported window status; the live API sends `ok` | `rate-limited`. */
+  status?: string;
+  /** Epoch seconds when the window resets. */
+  resetAt?: number;
 }
 
 export interface OpencodeUsageData {
@@ -39,13 +50,12 @@ export interface OpencodeUsageData {
   rolling?: OpencodeWindow;
   weekly?: OpencodeWindow;
   monthly?: OpencodeWindow;
-  dashboard?: {
-    rolling?: number;
-    weekly?: number;
-    monthly?: number;
-  };
+  /** `"opencode-usage-api"` (primary endpoint) or `"opencode-probe"` (fallback). */
   source: string;
-  probeModel: string;
+  /** Endpoint failure that triggered the probe fallback (fallback runs only). */
+  fallbackReason?: string;
+  /** Model used by the fallback probe (fallback runs only). */
+  probeModel?: string;
 }
 
 /** Read a numeric header value (case-insensitive) from a Headers-like object. */
@@ -62,34 +72,6 @@ export function numberHeader(
   return undefined;
 }
 
-function readOpencodeWorkspaceId(): string | undefined {
-  const env = process.env.OPENCODE_GO_WORKSPACE_ID?.trim();
-  if (env) return env;
-  return readOpencodeConfigField("workspaceId");
-}
-
-function readOpencodeAuthCookie(): string | undefined {
-  const env = process.env.OPENCODE_GO_AUTH_COOKIE?.trim();
-  if (env) return env;
-  return readOpencodeConfigField("authCookie");
-}
-
-function readOpencodeConfigField(field: "workspaceId" | "authCookie"): string | undefined {
-  const explicitConfig = process.env.OPENCODE_GO_QUOTA_CONFIG;
-  const candidates = [
-    explicitConfig,
-    process.env.XDG_CONFIG_HOME
-      ? join(process.env.XDG_CONFIG_HOME, "opencode", "opencode-quota", "opencode-go.json")
-      : undefined,
-    join(homedir(), ".config", "opencode", "opencode-quota", "opencode-go.json"),
-  ].filter(Boolean) as string[];
-  for (const path of candidates) {
-    const data = readJson(path);
-    if (data && typeof data[field] === "string" && data[field]) return data[field];
-  }
-  return undefined;
-}
-
 /** Clamp an opencode window value to 0–100, or undefined when not finite. */
 export function normalizeOpencodeWindow(value: unknown): number | undefined {
   if (value === undefined) return undefined;
@@ -98,57 +80,93 @@ export function normalizeOpencodeWindow(value: unknown): number | undefined {
   return Math.max(0, Math.min(100, num));
 }
 
-/** Parse the dashboard JSON blob scraped from the opencode workspace HTML. */
-export function parseOpencodeDashboard(parsed: any): {
-  rolling?: number;
-  weekly?: number;
-  monthly?: number;
-} | undefined {
-  const rolling = normalizeOpencodeWindow(parsed?.rollingUsage);
-  const weekly = normalizeOpencodeWindow(parsed?.weeklyUsage);
-  const monthly = normalizeOpencodeWindow(parsed?.monthlyUsage);
-  if (rolling === undefined && weekly === undefined && monthly === undefined) return undefined;
-  return { rolling, weekly, monthly };
+/**
+ * Parse an absolute reset timestamp into epoch seconds.
+ *
+ * The live usage endpoint sends ISO-8601 strings (`"2026-09-16T07:16:35.669Z"`);
+ * numeric epoch seconds / milliseconds are also accepted defensively in case
+ * the API switches representation. Anything unparseable → undefined.
+ */
+export function normalizeOpencodeResetAt(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? normalizeResetAt(value) : undefined;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) return normalizeResetAt(numeric);
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms) ? Math.round(ms / 1000) : undefined;
 }
 
-async function fetchOpencodeDashboardQuota(): Promise<
-  { rolling?: number; weekly?: number; monthly?: number } | undefined
-> {
-  const workspaceId = readOpencodeWorkspaceId();
-  const authCookie = readOpencodeAuthCookie();
-  if (!workspaceId || !authCookie) return undefined;
-  const url = `${OPENCODE_GO_DASHBOARD_PREFIX}${encodeURIComponent(workspaceId)}/go`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: {
-        Cookie: `auth=${authCookie}`,
-        "Accept-Encoding": "identity",
-        "User-Agent": "pi-usage-unified/0.1.0",
-      },
-    });
-  } catch {
-    return undefined;
-  }
-  if (!response.ok) return undefined;
-  let html = "";
-  try {
-    html = await response.text();
-  } catch {
-    return undefined;
-  }
-  const match = html.match(/\{[^{}]*"(?:rollingUsage|weeklyUsage|monthlyUsage)"[\s\S]*?\}/);
-  if (!match) return undefined;
-  let parsed: any;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return undefined;
-  }
-  return parseOpencodeDashboard(parsed);
+/**
+ * Normalize one usage window (`{ status, percent, resetsAt }`).
+ *
+ * Defensive about field names because the endpoint is new: `percent` accepts
+ * its camelCase/snake_case variants, `resetsAt` accepts the same family, and a
+ * window whose percent is missing/renamed is dropped rather than crashing —
+ * except when `status` says the window is exhausted, in which case it is
+ * reported as 100% used.
+ */
+export function parseOpencodeWindow(raw: any): OpencodeWindow | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const usedPercent = normalizeOpencodeWindow(
+    raw.percent ?? raw.usedPercent ?? raw.used_percent ?? raw.usagePercent,
+  );
+  const status = typeof raw.status === "string" ? raw.status : undefined;
+  const exhausted = status?.toLowerCase() === "rate-limited";
+  const percent = usedPercent ?? (exhausted ? 100 : undefined);
+  if (percent === undefined) return undefined;
+  const window: OpencodeWindow = { usedPercent: percent };
+  if (status) window.status = status;
+  const resetAt = normalizeOpencodeResetAt(raw.resetsAt ?? raw.resetAt ?? raw.reset_at);
+  if (resetAt !== undefined) window.resetAt = resetAt;
+  return window;
 }
 
-async function probeOpencode(ctx: FetchContext): Promise<OpencodeUsageData> {
+/**
+ * Parse a usage-endpoint response into the normalized shape. Pure — unit
+ * tested against the live response fixture.
+ *
+ * Throws `UsageError("nodata")` when no window could be read; a 200 that we
+ * cannot parse is surfaced as an error (the probe fallback deliberately does
+ * not run for it).
+ */
+export function parseOpencodeUsage(parsed: any): OpencodeUsageData {
+  // The shipped response wraps the windows in a top-level `usage` object; fall
+  // back to the root too so a future unwrapped response still parses.
+  const root = parsed?.usage ?? parsed;
+  const rolling = parseOpencodeWindow(root?.rolling);
+  const weekly = parseOpencodeWindow(root?.weekly);
+  const monthly = parseOpencodeWindow(root?.monthly);
+  if (!rolling && !weekly && !monthly) {
+    throw new UsageError("OpenCode usage response has no rolling/weekly/monthly windows", "nodata");
+  }
+  const data: OpencodeUsageData = {
+    provider: "opencode",
+    label: "OpenCode",
+    source: "opencode-usage-api",
+  };
+  if (rolling) data.rolling = rolling;
+  if (weekly) data.weekly = weekly;
+  if (monthly) data.monthly = monthly;
+  return data;
+}
+
+/**
+ * Endpoint failures that justify falling back to the chat-completion probe.
+ * A response the endpoint did return but we could not parse (`nodata`,
+ * `badjson`) is NOT in this set: the endpoint is the source of truth and its
+ * breakdown must be visible instead of being masked by probe numbers.
+ */
+export function shouldFallbackToProbe(error: unknown): boolean {
+  if (!(error instanceof UsageError)) return false;
+  if (error.code === "fetch") return true;
+  if (error.code === "http401" || error.code === "http403" || error.code === "http404") return true;
+  return /^http5\d\d$/.test(error.code);
+}
+
+/** Resolve the OpenCode Go API key (pi auth store first, `OPENCODE_API_KEY` second). */
+async function resolveOpencodeKey(ctx: FetchContext): Promise<string> {
   const fromRegistry = await getApiKey(ctx.modelRegistry, ["opencode-go", "opencode"]);
   const apiKey =
     (fromRegistry && fromRegistry !== PROXY_MANAGED_SENTINEL
@@ -160,7 +178,59 @@ async function probeOpencode(ctx: FetchContext): Promise<OpencodeUsageData> {
       "noauth",
     );
   }
+  return apiKey;
+}
 
+/** GET the OpenCode Go usage endpoint (the primary source of truth). */
+async function fetchOpencodeUsageApi(apiKey: string): Promise<OpencodeUsageData> {
+  let response: Response;
+  try {
+    response = await fetch(`${OPENCODE_GO_BASE_URL}/usage`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+        "Accept-Encoding": "identity",
+        "User-Agent": OPENCODE_GO_USER_AGENT,
+      },
+    });
+  } catch (error) {
+    throw new UsageError(
+      `Network error: ${error instanceof Error ? error.message : String(error)}`,
+      "fetch",
+    );
+  }
+  if (response.status === 401) {
+    throw new UsageError("OpenCode usage auth failed (401): missing or unknown key", "http401");
+  }
+  if (response.status === 403) {
+    throw new UsageError("OpenCode usage forbidden (403): no OpenCode Go subscription", "http403");
+  }
+  if (!response.ok) {
+    let body = "";
+    try {
+      body = await response.text();
+    } catch {
+      /* ignore */
+    }
+    throw new UsageError(
+      `OpenCode usage HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+      `http${response.status}`,
+    );
+  }
+  let parsed: any;
+  try {
+    parsed = await response.json();
+  } catch (error) {
+    throw new UsageError(
+      `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      "badjson",
+    );
+  }
+  return parseOpencodeUsage(parsed);
+}
+
+/** Fallback: 1-token chat probe that sniffs the `x-opencode-*-usage-percent` headers. */
+async function probeOpencode(apiKey: string): Promise<OpencodeUsageData> {
   let response: Response;
   try {
     response = await fetch(`${OPENCODE_GO_BASE_URL}/chat/completions`, {
@@ -169,7 +239,7 @@ async function probeOpencode(ctx: FetchContext): Promise<OpencodeUsageData> {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
-        "User-Agent": "pi-usage-unified/0.1.0",
+        "User-Agent": OPENCODE_GO_USER_AGENT,
       },
       body: JSON.stringify(OPENCODE_GO_PROBE_BODY),
     });
@@ -200,79 +270,78 @@ async function probeOpencode(ctx: FetchContext): Promise<OpencodeUsageData> {
     numberHeader(headers, "x-opencode-monthly-usage-percent") ??
     numberHeader(headers, "x-opencode-monthly-used-percent") ??
     numberHeader(headers, "x-monthly-usage-percent");
-  const dashboard = await fetchOpencodeDashboardQuota();
 
-  const hasAny =
-    rolling !== undefined ||
-    weekly !== undefined ||
-    monthly !== undefined ||
-    (dashboard !== undefined &&
-      (dashboard.rolling !== undefined || dashboard.weekly !== undefined || dashboard.monthly !== undefined));
-  if (!hasAny) {
-    throw new UsageError(
-      "OpenCode Go exposes no rate-limit headers. Set OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE for dashboard quota.",
-      "noquotadata",
-    );
+  if (rolling === undefined && weekly === undefined && monthly === undefined) {
+    throw new UsageError("OpenCode Go exposes no rate-limit headers", "noquotadata");
   }
-  return {
+  const data: OpencodeUsageData = {
     provider: "opencode",
     label: "OpenCode",
-    rolling: rolling !== undefined ? { usedPercent: rolling } : undefined,
-    weekly: weekly !== undefined ? { usedPercent: weekly } : undefined,
-    monthly: monthly !== undefined ? { usedPercent: monthly } : undefined,
-    dashboard:
-      dashboard &&
-      (dashboard.rolling !== undefined || dashboard.weekly !== undefined || dashboard.monthly !== undefined)
-        ? dashboard
-        : undefined,
     source: "opencode-probe",
     probeModel: OPENCODE_GO_PROBE_MODEL,
   };
+  if (rolling !== undefined) data.rolling = { usedPercent: rolling };
+  if (weekly !== undefined) data.weekly = { usedPercent: weekly };
+  if (monthly !== undefined) data.monthly = { usedPercent: monthly };
+  return data;
 }
 
-function colorWindowPart(part: string, theme: Theme): string {
-  const num = Number(part.replace(/[^0-9.]/g, ""));
-  return colorForPercentage(Number.isFinite(num) ? num : 0, theme)(part);
+async function fetchOpencode(ctx: FetchContext): Promise<OpencodeUsageData> {
+  const apiKey = await resolveOpencodeKey(ctx);
+  try {
+    return await fetchOpencodeUsageApi(apiKey);
+  } catch (error) {
+    if (!shouldFallbackToProbe(error)) throw error;
+    const failure = error as UsageError;
+    try {
+      const probed = await probeOpencode(apiKey);
+      probed.fallbackReason = `${failure.code}: ${failure.message}`;
+      return probed;
+    } catch {
+      // The endpoint is the source of truth: report its failure, not the probe's.
+      throw error;
+    }
+  }
+}
+
+function renderWindow(tag: string, window: OpencodeWindow, theme: Theme): string {
+  const head = colorForPercentage(window.usedPercent, theme)(`${tag} ${pct(window.usedPercent)}`);
+  const reset = window.resetAt ? fg(theme, "dim", ` (${formatDurationFromNow(window.resetAt)})`) : "";
+  return `${head}${reset}`;
 }
 
 function renderStatus(data: OpencodeUsageData, theme: Theme): string {
   const parts: string[] = [];
-  if (data.rolling?.usedPercent !== undefined) parts.push(`R ${pct(data.rolling.usedPercent)}`);
-  if (data.weekly?.usedPercent !== undefined) parts.push(`W ${pct(data.weekly.usedPercent)}`);
-  if (data.monthly?.usedPercent !== undefined) parts.push(`M ${pct(data.monthly.usedPercent)}`);
-  const label =
-    parts.length > 0
-      ? parts.map((p) => colorWindowPart(p, theme)).join(fg(theme, "dim", " "))
-      : "n/a";
-  const dashboard = data.dashboard;
-  if (
-    dashboard &&
-    (dashboard.rolling !== undefined || dashboard.weekly !== undefined || dashboard.monthly !== undefined)
-  ) {
-    const dparts: string[] = [];
-    if (dashboard.rolling !== undefined) dparts.push(`R ${pct(dashboard.rolling)}`);
-    if (dashboard.weekly !== undefined) dparts.push(`W ${pct(dashboard.weekly)}`);
-    if (dashboard.monthly !== undefined) dparts.push(`M ${pct(dashboard.monthly)}`);
-    const dlabel = dparts.map((p) => colorWindowPart(p, theme)).join(fg(theme, "dim", " "));
-    return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " OpenCode ")}${dlabel}${fg(theme, "dim", " · ")}${label}${fg(theme, "dim", " used")}`;
-  }
-  return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " OpenCode ")}${label}${fg(theme, "dim", " used")}`;
+  if (data.rolling) parts.push(renderWindow("R", data.rolling, theme));
+  if (data.weekly) parts.push(renderWindow("W", data.weekly, theme));
+  if (data.monthly) parts.push(renderWindow("M", data.monthly, theme));
+  const label = parts.length > 0 ? parts.join(fg(theme, "dim", " ")) : "n/a";
+  const suffix =
+    data.source === "opencode-probe" ? " used (probe fallback)" : " used";
+  return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " OpenCode ")}${label}${fg(theme, "dim", suffix)}`;
 }
 
 function formatDetails(data: OpencodeUsageData): string {
-  return [
-    "OpenCode Go usage",
-    data.rolling?.usedPercent !== undefined ? `Rolling: ${pct(data.rolling.usedPercent)} used` : undefined,
-    data.weekly?.usedPercent !== undefined ? `Weekly: ${pct(data.weekly.usedPercent)} used` : undefined,
-    data.monthly?.usedPercent !== undefined ? `Monthly: ${pct(data.monthly.usedPercent)} used` : undefined,
-    data.dashboard?.rolling !== undefined ? `Dashboard rolling: ${pct(data.dashboard.rolling)} used` : undefined,
-    data.dashboard?.weekly !== undefined ? `Dashboard weekly: ${pct(data.dashboard.weekly)} used` : undefined,
-    data.dashboard?.monthly !== undefined ? `Dashboard monthly: ${pct(data.dashboard.monthly)} used` : undefined,
-    data.probeModel ? `Probed: ${data.probeModel}` : undefined,
-    `Source: ${data.source}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const windows: Array<[string, OpencodeWindow | undefined]> = [
+    ["Rolling", data.rolling],
+    ["Weekly", data.weekly],
+    ["Monthly", data.monthly],
+  ];
+  const lines = ["OpenCode Go usage"];
+  for (const [label, window] of windows) {
+    if (!window) continue;
+    const status = window.status && window.status !== "ok" ? ` [${window.status}]` : "";
+    const reset = window.resetAt
+      ? `, resets in ${formatDurationFromNow(window.resetAt)} (${new Date(window.resetAt * 1000).toISOString()})`
+      : "";
+    lines.push(`${label}: ${pct(window.usedPercent)} used${status}${reset}`);
+  }
+  if (data.source === "opencode-probe") {
+    lines.push(`Fallback: usage endpoint failed (${data.fallbackReason ?? "unknown"})`);
+    if (data.probeModel) lines.push(`Probed: ${data.probeModel}`);
+  }
+  lines.push(`Source: ${data.source}`);
+  return lines.join("\n");
 }
 
 export const opencodeProvider: UsageProvider<OpencodeUsageData> = {
@@ -280,7 +349,7 @@ export const opencodeProvider: UsageProvider<OpencodeUsageData> = {
   label: "OpenCode",
   match: (provider) => provider?.startsWith("opencode") ?? false,
   ttlMs: 60_000,
-  fetch: probeOpencode,
+  fetch: fetchOpencode,
   renderStatus,
   formatDetails,
 };
