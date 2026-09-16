@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   numberHeader,
@@ -356,12 +355,24 @@ describe("provider module surface", () => {
   it("no longer ships the dashboard scrape path", async () => {
     const mod = (await import("../src/providers/opencode.js")) as Record<string, unknown>;
     expect(mod.parseOpencodeDashboard).toBeUndefined();
+  });
 
-    const source = readFileSync(new URL("../src/providers/opencode.ts", import.meta.url), "utf8");
-    expect(source).not.toContain("OPENCODE_GO_WORKSPACE_ID");
-    expect(source).not.toContain("OPENCODE_GO_AUTH_COOKIE");
-    expect(source).not.toContain("OPENCODE_GO_QUOTA_CONFIG");
-    expect(source).not.toContain("workspace/");
-    expect(source).not.toContain("parseOpencodeDashboard");
+  it("ignores legacy dashboard-scrape env vars and only GETs the usage endpoint", async () => {
+    vi.stubEnv("OPENCODE_GO_WORKSPACE_ID", "wrk_legacy");
+    vi.stubEnv("OPENCODE_GO_AUTH_COOKIE", "session=legacy-secret");
+    vi.stubEnv("OPENCODE_GO_QUOTA_CONFIG", "/tmp/legacy-quota.json");
+    const spy = mockFetch({ "/zen/go/v1/usage": () => jsonResponse(liveUsageResponse) });
+    const data = await opencodeProvider.fetch({
+      modelRegistry: fakeModelRegistry({ "opencode-go": "sk-live" }),
+    });
+    expect(data.source).toBe("opencode-usage-api");
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [input, init] = spy.mock.calls[0]!;
+    expect(String(input)).toBe("https://opencode.ai/zen/go/v1/usage");
+    const request = (init ?? {}) as RequestInit;
+    expect(request.method ?? "GET").toBe("GET");
+    const headers = (request.headers ?? {}) as Record<string, string>;
+    expect(JSON.stringify(headers)).not.toContain("legacy-secret");
+    expect(JSON.stringify(headers)).not.toContain("wrk_legacy");
   });
 });
