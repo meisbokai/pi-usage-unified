@@ -59,7 +59,7 @@ All six built-in providers are registered by default.
 | **Z.ai / GLM** | `zai*`, `glm` | API key (`zai` / `glm` / `zai-coding-cn`) | — |
 | **Cursor** | `cursor*` | Admin API key **or** Cursor Desktop session (SQLite) | `CURSOR_USAGE_MODE` (`auto`\|`admin`\|`dashboard`), `CURSOR_USAGE_EMAIL`, `CURSOR_ADMIN_API_KEY`, `CURSOR_API_KEY` |
 | **OpenAI Codex** | `openai-codex*` | OAuth token (`openai-codex`) + `openai-codex.accountId` in `~/.pi/agent/auth.json` | — |
-| **OpenCode Go** | `opencode*` | API key (`opencode-go` / `opencode`) | `OPENCODE_API_KEY`, `OPENCODE_GO_WORKSPACE_ID`, `OPENCODE_GO_AUTH_COOKIE`, `OPENCODE_GO_QUOTA_CONFIG` |
+| **OpenCode Go** | `opencode*` | API key (`opencode-go` / `opencode`) | `OPENCODE_API_KEY` |
 | **OpenRouter** | `openrouter*` | API key (`openrouter`) | `OPENROUTER_API_KEY` |
 | **DeepSeek** | `deepseek*` | API key (`deepseek`) | `DEEPSEEK_API_KEY` |
 
@@ -68,7 +68,7 @@ All six built-in providers are registered by default.
 - **Z.ai / GLM** — `GET https://api.z.ai/api/monitor/usage/quota/limit`, parses the `TOKENS_LIMIT` percentage and next reset time.
 - **Cursor** — Two modes. **Admin API** (`POST api.cursor.com/teams/spend`, Basic auth) reads team-member spend. **Dashboard** reads the Cursor Desktop SQLite `state.vscdb` for the access/refresh token + email, then calls `POST api2.cursor.sh/.../GetCurrentPeriodUsage` (with automatic OAuth refresh). `CURSOR_USAGE_MODE=auto` (default) prefers the admin key and falls back to the dashboard on auth errors. Renders total / Auto+Composer / API percentages.
 - **OpenAI Codex** — `GET chatgpt.com/backend-api/codex/usage` (fallback `/wham/usage`) with the `chatgpt-account-id` header. Renders primary (5h) + secondary (weekly) `used_percent`, reset times, plan, and credits.
-- **OpenCode Go** — Probes `POST opencode.ai/zen/go/v1/chat/completions` with a 1-token ping and reads the `x-opencode-*-usage-percent` headers (rolling/weekly/monthly). Optionally scrapes dashboard quota from `opencode.ai/workspace/<id>/go` when `OPENCODE_GO_WORKSPACE_ID` + `OPENCODE_GO_AUTH_COOKIE` are set.
+- **OpenCode Go** — `GET opencode.ai/zen/go/v1/usage` (the OpenCode Go usage API, [anomalyco/opencode#16513](https://github.com/anomalyco/opencode/pull/16513)) with the pi-stored `opencode-go` key. Renders the rolling / weekly / monthly windows as used % plus their absolute reset times. Falling back only when the endpoint fails (network, 401, 403, 404, 5xx), it probes `POST opencode.ai/zen/go/v1/chat/completions` with a 1-token ping and reads the `x-opencode-*-usage-percent` headers; the fallback is labelled in `/pi-usage`, never silent. No chat-completion call is spent and no session cookie is needed while the endpoint works.
 - **OpenRouter** — `GET openrouter.ai/api/v1/key` (spend, limit, key-limit %) and `GET openrouter.ai/api/v1/credits` (total purchased − total usage → balance). Renders key-limit %, spend, and credit balance ($).
 - **DeepSeek** — `GET api.deepseek.com/user/balance`. Renders the balance object (`is_sufficient`, `discounted_balance`, `granted_balance`, `topped_up_balance`) as a credit balance — not a percentage.
 

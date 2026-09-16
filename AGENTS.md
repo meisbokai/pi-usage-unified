@@ -34,6 +34,15 @@ goal was structure, not new logic — preserve their fetch/parse/render behavior
 The two NEW providers are openrouter and deepseek. When changing a ported
 provider, diff against the monolith first.
 
+**Deliberate exception (opencode):** opencode was moved off the monolith's
+probe-first design. Its primary source is now `GET
+https://opencode.ai/zen/go/v1/usage` (OpenCode Go's real usage API, which also
+supplies absolute reset times); the 1-token chat probe/header sniff remains
+only as a fallback for endpoint failures (network, 401, 403, 404, 5xx) and is
+labelled as such in `/pi-usage`. The old HTML dashboard scrape
+(workspace-id + session-cookie env vars) was removed. Do not "restore parity"
+with the monolith here.
+
 The 3-way sandbox-aware auth strategy (`buildAuthHeaders`) mirrors
 `@alexanderfortin/pi-usage-lib`: real key → `Bearer`; `"proxy-managed"`
 sentinel → no header (Docker sandbox proxy injects it); no key → no header.
@@ -55,8 +64,8 @@ Always set `Accept-Encoding: identity` (undici EnvHttpProxyAgent gzip quirk).
   `temporal-polyfill` — use `Date` math.
 - Parse logic is factored into **pure exported functions**
   (`parseZaiUsage`, `normalizeCodexUsage`, `resolveCursorPercentages`,
-  `parseOpenRouterKey`, `parseDeepSeekBalance`, …) so they can be unit-tested
-  with fixture JSON without `fetch`.
+  `parseOpenRouterKey`, `parseDeepSeekBalance`, `parseOpencodeUsage`, …) so they
+  can be unit-tested with fixture JSON without `fetch`.
 - The registry erases provider data-type params to `UsageProvider<any>` on
   insert (function params are contravariant, so `UsageProvider<ZaiData>` is not
   assignable to `UsageProvider<unknown>`).
@@ -81,3 +90,10 @@ The registry lowercases `ctx.model.provider` before calling `match`:
 | opencode | `opencode*` |
 | openrouter | `openrouter*` |
 | deepseek | `deepseek*` |
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
