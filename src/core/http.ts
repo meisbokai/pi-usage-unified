@@ -39,7 +39,8 @@ export async function safeFetchJson(url: string, init: RequestInit = {}): Promis
 /**
  * Fetch with error wrapping. Network failures → `UsageError("fetch")`. HTTP
  * non-2xx → `UsageError("http{status}")` with a short body snippet. Returns
- * the raw `Response` so callers can read headers (used by the opencode probe).
+ * the raw `Response` for callers that need status or headers instead of a
+ * parsed body.
  */
 export async function safeFetch(url: string, init: RequestInit = {}): Promise<Response> {
   let response: Response;
