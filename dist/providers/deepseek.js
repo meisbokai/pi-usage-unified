@@ -35,8 +35,6 @@ function rawWallets(parsed) {
         if (infos.length > 0)
             return infos;
     }
-    if (Array.isArray(parsed))
-        return parsed.filter(isWalletObject);
     // Legacy single-object shape: `balance: { currency, total_balance, ... }`,
     // or the same wallet fields at the top level.
     const single = parsed?.balance ?? parsed;
@@ -60,22 +58,6 @@ export function parseDeepSeekBalance(parsed) {
         source: "deepseek-api",
     };
 }
-/**
- * The smallest defined wallet balance — the wallet closest to depletion.
- *
- * Amounts in different currencies are compared nominally (no FX rates are
- * fetched); the value is only used to pick the warning colour, so the
- * closest-to-zero wallet wins.
- */
-export function leastFundedBalance(wallets) {
-    let min;
-    for (const wallet of wallets) {
-        if (wallet.totalBalance === undefined)
-            continue;
-        min = min === undefined ? wallet.totalBalance : Math.min(min, wallet.totalBalance);
-    }
-    return min;
-}
 async function fetchDeepSeek(ctx) {
     const headers = await buildAuthHeaders(ctx.modelRegistry, ["deepseek"]);
     const parsed = await safeFetchJson(DEEPSEEK_BALANCE_URL, { headers });
@@ -91,20 +73,26 @@ function money(value, currency) {
         return `${symbol}${rounded}`;
     return currency ? `${rounded} ${currency}` : `${rounded}`;
 }
+/**
+ * Colour a single wallet by its own balance. An unavailable balance is an
+ * explicit error state that overrides the per-wallet colours, so every wallet
+ * renders in the error colour rather than one wallet colouring its siblings.
+ */
+function walletColor(data, wallet, theme) {
+    if (!data.isAvailable)
+        return (s) => fg(theme, "error", s);
+    if (wallet.totalBalance === undefined)
+        return (s) => fg(theme, "muted", s);
+    return colorForCredit(wallet.totalBalance, theme);
+}
 function renderStatus(data, theme) {
     const walletText = data.wallets.length
-        ? data.wallets.map((wallet) => money(wallet.totalBalance, wallet.currency)).join(" ")
-        : "?";
-    const leastFunded = leastFundedBalance(data.wallets);
-    // Unavailable balance is always an error; otherwise colour the whole wallet
-    // list by the least-funded wallet (low balance → warning/error).
-    const color = !data.isAvailable
-        ? (s) => fg(theme, "error", s)
-        : leastFunded !== undefined
-            ? colorForCredit(leastFunded, theme)
-            : (s) => fg(theme, "muted", s);
+        ? data.wallets
+            .map((wallet) => walletColor(data, wallet, theme)(money(wallet.totalBalance, wallet.currency)))
+            .join(" ")
+        : fg(theme, data.isAvailable ? "muted" : "error", "?");
     const marker = !data.isAvailable ? fg(theme, "dim", " (unavailable)") : "";
-    return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " DeepSeek ")}${color(walletText)}${fg(theme, "dim", " bal")}${marker}`;
+    return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " DeepSeek ")}${walletText}${fg(theme, "dim", " bal")}${marker}`;
 }
 function formatDetails(data) {
     const lines = ["DeepSeek usage"];

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deepseekProvider, leastFundedBalance, parseDeepSeekBalance } from "../src/providers/deepseek.js";
+import { deepseekProvider, parseDeepSeekBalance } from "../src/providers/deepseek.js";
+import type { Theme } from "../src/core/types.js";
 import { fakeModelRegistry, stubTheme } from "./helpers.js";
 
 /** Live `GET /user/balance` payload from an account with two wallets. */
@@ -10,6 +11,9 @@ const multiWalletFixture = {
     { currency: "CNY", total_balance: "49.27", granted_balance: "0.00", topped_up_balance: "49.27" },
   ],
 };
+
+/** Theme stub that tags each segment with its colour role. */
+const roleTheme = { fg: (role: string, text: string) => `[${role}]${text}` } as unknown as Theme;
 
 /** Legacy single-object payload (older API versions/accounts). */
 const legacyFixture = {
@@ -53,19 +57,6 @@ describe("parseDeepSeekBalance", () => {
   });
 });
 
-describe("leastFundedBalance", () => {
-  it("picks the least-funded wallet from the live payload", () => {
-    const d = parseDeepSeekBalance(multiWalletFixture);
-    // USD 0.00 is smaller than CNY 49.27 → it drives the status colour.
-    expect(leastFundedBalance(d.wallets)).toBe(0);
-  });
-
-  it("skips wallets without a numeric total and returns undefined when there are none", () => {
-    expect(leastFundedBalance([{ currency: "USD" }, { currency: "CNY", totalBalance: 3 }])).toBe(3);
-    expect(leastFundedBalance([])).toBeUndefined();
-  });
-});
-
 describe("deepseekProvider.renderStatus", () => {
   it("shows both wallet amounts in the footer line", () => {
     const line = deepseekProvider.renderStatus!(parseDeepSeekBalance(multiWalletFixture), stubTheme);
@@ -80,11 +71,13 @@ describe("deepseekProvider.renderStatus", () => {
     expect(line).toContain("?");
   });
 
-  it("marks the balance unavailable when is_available is false", () => {
+  it("forces the error colour on every wallet when the balance is unavailable", () => {
     const line = deepseekProvider.renderStatus!(
       parseDeepSeekBalance({ is_available: false, balance_infos: multiWalletFixture.balance_infos }),
-      stubTheme,
+      roleTheme,
     );
+    expect(line).toContain("[error]$0");
+    expect(line).toContain("[error]¥49.27");
     expect(line).toContain("unavailable");
   });
 

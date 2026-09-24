@@ -38,7 +38,10 @@ export interface DeepSeekWallet {
 export interface DeepSeekUsageData {
   provider: "deepseek";
   label: string;
-  /** `is_available` (legacy: `is_sufficient !== false`). */
+  /**
+   * `is_available` (legacy: `is_sufficient !== false`). When false the whole
+   * wallet list renders in the error colour.
+   */
   isAvailable: boolean;
   /** Every wallet in the response, in payload order; empty when absent. */
   wallets: DeepSeekWallet[];
@@ -82,7 +85,6 @@ function rawWallets(parsed: any): Record<string, unknown>[] {
     const infos = parsed.balance_infos.filter(isWalletObject);
     if (infos.length > 0) return infos;
   }
-  if (Array.isArray(parsed)) return parsed.filter(isWalletObject);
   // Legacy single-object shape: `balance: { currency, total_balance, ... }`,
   // or the same wallet fields at the top level.
   const single = parsed?.balance ?? parsed;
@@ -108,22 +110,6 @@ export function parseDeepSeekBalance(parsed: any): DeepSeekUsageData {
   };
 }
 
-/**
- * The smallest defined wallet balance — the wallet closest to depletion.
- *
- * Amounts in different currencies are compared nominally (no FX rates are
- * fetched); the value is only used to pick the warning colour, so the
- * closest-to-zero wallet wins.
- */
-export function leastFundedBalance(wallets: DeepSeekWallet[]): number | undefined {
-  let min: number | undefined;
-  for (const wallet of wallets) {
-    if (wallet.totalBalance === undefined) continue;
-    min = min === undefined ? wallet.totalBalance : Math.min(min, wallet.totalBalance);
-  }
-  return min;
-}
-
 async function fetchDeepSeek(ctx: FetchContext): Promise<DeepSeekUsageData> {
   const headers = await buildAuthHeaders(ctx.modelRegistry, ["deepseek"]);
   const parsed = await safeFetchJson(DEEPSEEK_BALANCE_URL, { headers });
@@ -139,20 +125,25 @@ function money(value: number | undefined, currency?: string): string {
   return currency ? `${rounded} ${currency}` : `${rounded}`;
 }
 
+/**
+ * Colour a single wallet by its own balance. An unavailable balance is an
+ * explicit error state that overrides the per-wallet colours, so every wallet
+ * renders in the error colour rather than one wallet colouring its siblings.
+ */
+function walletColor(data: DeepSeekUsageData, wallet: DeepSeekWallet, theme: Theme): (s: string) => string {
+  if (!data.isAvailable) return (s) => fg(theme, "error", s);
+  if (wallet.totalBalance === undefined) return (s) => fg(theme, "muted", s);
+  return colorForCredit(wallet.totalBalance, theme);
+}
+
 function renderStatus(data: DeepSeekUsageData, theme: Theme): string {
   const walletText = data.wallets.length
-    ? data.wallets.map((wallet) => money(wallet.totalBalance, wallet.currency)).join(" ")
-    : "?";
-  const leastFunded = leastFundedBalance(data.wallets);
-  // Unavailable balance is always an error; otherwise colour the whole wallet
-  // list by the least-funded wallet (low balance → warning/error).
-  const color = !data.isAvailable
-    ? (s: string) => fg(theme, "error", s)
-    : leastFunded !== undefined
-      ? colorForCredit(leastFunded, theme)
-      : (s: string) => fg(theme, "muted", s);
+    ? data.wallets
+        .map((wallet) => walletColor(data, wallet, theme)(money(wallet.totalBalance, wallet.currency)))
+        .join(" ")
+    : fg(theme, data.isAvailable ? "muted" : "error", "?");
   const marker = !data.isAvailable ? fg(theme, "dim", " (unavailable)") : "";
-  return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " DeepSeek ")}${color(walletText)}${fg(theme, "dim", " bal")}${marker}`;
+  return `${fg(theme, "muted", "Usage:")}${fg(theme, "muted", " DeepSeek ")}${walletText}${fg(theme, "dim", " bal")}${marker}`;
 }
 
 function formatDetails(data: DeepSeekUsageData): string {

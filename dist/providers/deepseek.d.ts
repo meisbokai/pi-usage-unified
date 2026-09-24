@@ -31,7 +31,10 @@ export interface DeepSeekWallet {
 export interface DeepSeekUsageData {
     provider: "deepseek";
     label: string;
-    /** `is_available` (legacy: `is_sufficient !== false`). */
+    /**
+     * `is_available` (legacy: `is_sufficient !== false`). When false the whole
+     * wallet list renders in the error colour.
+     */
     isAvailable: boolean;
     /** Every wallet in the response, in payload order; empty when absent. */
     wallets: DeepSeekWallet[];
@@ -42,13 +45,5 @@ export interface DeepSeekUsageData {
  * Pure function — unit tested.
  */
 export declare function parseDeepSeekBalance(parsed: any): DeepSeekUsageData;
-/**
- * The smallest defined wallet balance — the wallet closest to depletion.
- *
- * Amounts in different currencies are compared nominally (no FX rates are
- * fetched); the value is only used to pick the warning colour, so the
- * closest-to-zero wallet wins.
- */
-export declare function leastFundedBalance(wallets: DeepSeekWallet[]): number | undefined;
 export declare const deepseekProvider: UsageProvider<DeepSeekUsageData>;
 //# sourceMappingURL=deepseek.d.ts.map
